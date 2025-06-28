@@ -23,6 +23,9 @@
 *.pdb
 *.mdb
 *.opendb
+*.orig
+*.orig.meta
+
 
 # macOS
 .DS_Store
@@ -33,3 +36,4 @@ Desktop.ini
 
 # Ignore specific Asset Store tools (not the entire Assets folder)
 Assets/AssetStoreTools*
+Assets/Photon/PhotonLibs/**/*.pdb.meta
