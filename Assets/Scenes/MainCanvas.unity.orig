@@ -1274,6 +1274,7 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+<<<<<<< HEAD
 --- !u!1 &1471067789
 GameObject:
   m_ObjectHideFlags: 0
@@ -1577,6 +1578,8 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+=======
+>>>>>>> 7d262c8c2d5bf66e27e06c8b3781c1c9c92ee274
 --- !u!1 &1732474625
 GameObject:
   m_ObjectHideFlags: 0
