@@ -1,8 +1,9 @@
 using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.InputSystem;
+using Photon.Pun;
 
-public class BrushTool : MonoBehaviour
+public class BrushTool : MonoBehaviourPunCallbacks
 {
     [SerializeField] private GameObject pixelPrefab;
     [SerializeField] private Transform canvasParent;
@@ -26,9 +27,17 @@ public class BrushTool : MonoBehaviour
     private InputAction mousePositionAction;
     private InputAction mouseLeftClickAction;
     private bool isMouseHeld = false;
+    private PhotonView photonView;
+    private bool isInitialized = false;
 
     void Awake()
     {
+        photonView = GetComponent<PhotonView>();
+        if (photonView == null)
+        {
+            Debug.LogError("PhotonView component missing on BrushTool GameObject");
+        }
+
         BrushTool[] instances = FindObjectsOfType<BrushTool>();
         if (instances.Length > 1)
         {
@@ -42,7 +51,14 @@ public class BrushTool : MonoBehaviour
 
     void Start()
     {
+        if (!PhotonNetwork.IsConnected)
+        {
+            Debug.LogWarning("Not connected to Photon. Multiplayer features disabled.");
+        }
+
         Debug.Log($"BrushTool Start on {gameObject.name}, instance ID: {GetInstanceID()}");
+        Debug.Log($"sizeSlider is {(sizeSlider != null ? $"assigned to {sizeSlider.name}" : "null")}");
+
         if (redButton != null) redButton.gameObject.SetActive(isBrushActive);
         if (blueButton != null) blueButton.gameObject.SetActive(isBrushActive);
         if (greenButton != null) greenButton.gameObject.SetActive(isBrushActive);
@@ -64,6 +80,10 @@ public class BrushTool : MonoBehaviour
                 currentSize = value;
                 Debug.Log($"Brush/Erase size set to {currentSize}");
             });
+        }
+        else
+        {
+            Debug.LogError("sizeSlider is not assigned in the Inspector");
         }
 
         if (toggleBrushButton != null)
@@ -108,22 +128,45 @@ public class BrushTool : MonoBehaviour
         // Set up Input System actions
         mousePositionAction = new InputAction("MousePosition", InputActionType.Value, "<Mouse>/position");
         mouseLeftClickAction = new InputAction("MouseLeftClick", InputActionType.Button, "<Mouse>/leftButton");
-        mouseLeftClickAction.performed += ctx => { isMouseHeld = true; HandleInput(); };
+        mouseLeftClickAction.performed += ctx => { if (isInitialized) { isMouseHeld = true; HandleInput(); } };
         mouseLeftClickAction.canceled += ctx => { isMouseHeld = false; lastErasedPos = Vector3.zero; };
-        mousePositionAction.performed += ctx => { if (isMouseHeld) HandleInput(); };
+        mousePositionAction.performed += ctx => { if (isInitialized && isMouseHeld && Camera.main != null) HandleInput(); };
         mousePositionAction.Enable();
         mouseLeftClickAction.Enable();
+
+        isInitialized = true;
     }
 
     void OnDestroy()
     {
-        mousePositionAction.Disable();
-        mouseLeftClickAction.Disable();
+        if (mousePositionAction != null) mousePositionAction.Disable();
+        if (mouseLeftClickAction != null) mouseLeftClickAction.Disable();
     }
 
     private void HandleInput()
     {
-        Vector2 mousePos = mousePositionAction.ReadValue<Vector2>();
+        if (Camera.main == null)
+        {
+            Debug.LogError("Main Camera not found. Ensure a camera is tagged 'MainCamera'.");
+            return;
+        }
+        if (mousePositionAction == null)
+        {
+            Debug.LogError("mousePositionAction is null. Input System not initialized correctly.");
+            return;
+        }
+
+        Vector2 mousePos = Vector2.zero;
+        try
+        {
+            mousePos = mousePositionAction.ReadValue<Vector2>();
+        }
+        catch (System.Exception ex)
+        {
+            Debug.LogError($"Failed to read mouse position: {ex.Message}");
+            return;
+        }
+
         Vector3 worldPos = Camera.main.ScreenToWorldPoint(mousePos);
         worldPos.z = 0;
         if (isBrushActive && !eraseMode)
@@ -131,7 +174,21 @@ public class BrushTool : MonoBehaviour
             if (Vector3.Distance(worldPos, lastDrawnPos) > currentSize * 0.5f)
             {
                 Debug.Log($"Drawing pixel at {worldPos} with size {currentSize}");
-                DrawPixel(worldPos);
+                if (PhotonNetwork.IsConnected && photonView != null)
+                {
+                    try
+                    {
+                        photonView.RPC("DrawPixelRPC", RpcTarget.All, worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError($"Failed to send DrawPixelRPC: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    DrawPixelRPC(worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a);
+                }
                 lastDrawnPos = worldPos;
             }
         }
@@ -139,7 +196,6 @@ public class BrushTool : MonoBehaviour
         {
             if (lastErasedPos != Vector3.zero)
             {
-                // Interpolate between lastErasedPos and worldPos
                 float distance = Vector3.Distance(lastErasedPos, worldPos);
                 if (distance > 0)
                 {
@@ -151,7 +207,21 @@ public class BrushTool : MonoBehaviour
                         {
                             Debug.Log($"Erasing at {interpPos} with size {currentSize}");
                         }
-                        ErasePixel(interpPos);
+                        if (PhotonNetwork.IsConnected && photonView != null)
+                        {
+                            try
+                            {
+                                photonView.RPC("ErasePixelRPC", RpcTarget.All, interpPos, currentSize);
+                            }
+                            catch (System.Exception ex)
+                            {
+                                Debug.LogError($"Failed to send ErasePixelRPC: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            ErasePixelRPC(interpPos, currentSize);
+                        }
                     }
                 }
             }
@@ -161,7 +231,21 @@ public class BrushTool : MonoBehaviour
                 {
                     Debug.Log($"Erasing at {worldPos} with size {currentSize}");
                 }
-                ErasePixel(worldPos);
+                if (PhotonNetwork.IsConnected && photonView != null)
+                {
+                    try
+                    {
+                        photonView.RPC("ErasePixelRPC", RpcTarget.All, worldPos, currentSize);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Debug.LogError($"Failed to send ErasePixelRPC: {ex.Message}");
+                    }
+                }
+                else
+                {
+                    ErasePixelRPC(worldPos, currentSize);
+                }
             }
             lastErasedPos = worldPos;
         }
@@ -179,42 +263,59 @@ public class BrushTool : MonoBehaviour
 
     public void ClearCanvas()
     {
-        foreach (Transform child in canvasParent)
+        if (PhotonNetwork.IsConnected && photonView != null)
         {
-            Destroy(child.gameObject);
+            try
+            {
+                photonView.RPC("ClearCanvasRPC", RpcTarget.All);
+            }
+            catch (System.Exception ex)
+            {
+                Debug.LogError($"Failed to send ClearCanvasRPC: {ex.Message}");
+            }
         }
-        Debug.Log("Canvas cleared, all pixels destroyed");
+        else
+        {
+            ClearCanvasRPC();
+        }
     }
 
-    private void DrawPixel(Vector3 position)
+    [PunRPC]
+    private void DrawPixelRPC(Vector3 position, float size, float r, float g, float b, float a)
     {
         if (pixelPrefab == null || canvasParent == null)
         {
             Debug.LogError($"DrawPixel failed: pixelPrefab={(pixelPrefab == null ? "null" : "set")}, canvasParent={(canvasParent == null ? "null" : canvasParent.name)}");
             return;
         }
-        GameObject pixel = Instantiate(pixelPrefab, position, Quaternion.identity, canvasParent);
+        GameObject pixel = PhotonNetwork.Instantiate("PixelRed", position, Quaternion.identity);
+        pixel.transform.SetParent(canvasParent);
         SpriteRenderer sr = pixel.GetComponent<SpriteRenderer>();
         BoxCollider2D collider = pixel.GetComponent<BoxCollider2D>();
         if (sr != null && collider != null)
         {
-            sr.color = brushColor;
+            sr.color = new Color(r, g, b, a);
             pixel.layer = LayerMask.NameToLayer("Default");
-            float scale = currentSize * 8f; // Adjust scale for visibility
+            float scale = size * 8f;
             pixel.transform.localScale = Vector3.one * scale;
-            collider.size = new Vector2(0.2f, 0.2f); // Larger fixed collider size
+            collider.size = new Vector2(0.2f, 0.2f);
             collider.enabled = true;
-            Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}");
+            if (Time.time - lastLogTime >= 0.5f)
+            {
+                Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}");
+            }
         }
         else
         {
             Debug.LogError($"Pixel at {position} missing SpriteRenderer or BoxCollider2D");
+            PhotonNetwork.Destroy(pixel);
         }
     }
 
-    private void ErasePixel(Vector3 position)
+    [PunRPC]
+    private void ErasePixelRPC(Vector3 position, float size)
     {
-        float eraseRadius = currentSize * 12f; // Larger radius to match brush scale
+        float eraseRadius = size * 12f;
         int defaultLayer = LayerMask.NameToLayer("Default");
         LayerMask layerMask = 1 << defaultLayer;
         if (Time.time - lastLogTime >= 0.5f)
@@ -236,7 +337,7 @@ public class BrushTool : MonoBehaviour
                 {
                     Debug.Log($"Erasing pixel at {hit.transform.position}, Scale={hit.transform.localScale.x}");
                 }
-                Destroy(hit.gameObject);
+                PhotonNetwork.Destroy(hit.gameObject);
             }
             else if (Time.time - lastLogTime >= 0.5f)
             {
@@ -245,6 +346,23 @@ public class BrushTool : MonoBehaviour
         }
         if (Time.time - lastLogTime >= 0.5f)
         {
+            lastLogTime = Time.time;
+        }
+    }
+
+    [PunRPC]
+    private void ClearCanvasRPC()
+    {
+        foreach (Transform child in canvasParent)
+        {
+            if (child.GetComponent<SpriteRenderer>() != null)
+            {
+                PhotonNetwork.Destroy(child.gameObject);
+            }
+        }
+        if (Time.time - lastLogTime >= 0.5f)
+        {
+            Debug.Log("Canvas cleared, all pixels destroyed");
             lastLogTime = Time.time;
         }
     }
