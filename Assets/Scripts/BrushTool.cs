@@ -2,6 +2,7 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.InputSystem;
 using Photon.Pun;
+using System.Collections.Generic;
 
 public class BrushTool : MonoBehaviourPunCallbacks
 {
@@ -21,9 +22,14 @@ public class BrushTool : MonoBehaviourPunCallbacks
     private Vector3 lastDrawnPos;
     private Vector3 lastErasedPos;
     private float lastLogTime = 0f;
+    private float lastDrawTime = 0f;
+    private int pixelCount = 0;
+    private Queue<GameObject> pixelQueue = new Queue<GameObject>(); // Track pixels in order
     private const float minSize = 0.03125f;
     private const float maxSize = 0.25f;
     private float currentSize = 0.03125f;
+    private const float drawCooldown = 0.01f; // Your adjusted value
+    private const int viewIdLimit = 998; // Delete oldest pixel when exceeded
     private InputAction mousePositionAction;
     private InputAction mouseLeftClickAction;
     private bool isMouseHeld = false;
@@ -171,8 +177,29 @@ public class BrushTool : MonoBehaviourPunCallbacks
         worldPos.z = 0;
         if (isBrushActive && !eraseMode)
         {
-            if (Vector3.Distance(worldPos, lastDrawnPos) > currentSize * 0.5f)
+            if (Time.time - lastDrawTime >= drawCooldown && Vector3.Distance(worldPos, lastDrawnPos) > currentSize * 1.5f)
             {
+                if (PhotonNetwork.IsConnected && pixelCount > viewIdLimit)
+                {
+                    Debug.Log($"Pixel count exceeds limit ({pixelCount}/{viewIdLimit}). Deleting oldest pixel.");
+                    if (pixelQueue.Count > 0)
+                    {
+                        GameObject oldPixel = pixelQueue.Dequeue();
+                        if (oldPixel != null)
+                        {
+                            if (PhotonNetwork.IsConnected)
+                            {
+                                PhotonNetwork.Destroy(oldPixel);
+                            }
+                            else
+                            {
+                                Destroy(oldPixel);
+                            }
+                            pixelCount--;
+                            Debug.Log($"Deleted oldest pixel at {oldPixel.transform.position}. Pixel count: {pixelCount}");
+                        }
+                    }
+                }
                 Debug.Log($"Drawing pixel at {worldPos} with size {currentSize}");
                 if (PhotonNetwork.IsConnected && photonView != null)
                 {
@@ -190,6 +217,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
                     DrawPixelRPC(worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a);
                 }
                 lastDrawnPos = worldPos;
+                lastDrawTime = Time.time;
             }
         }
         else if (eraseMode)
@@ -288,7 +316,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
             Debug.LogError($"DrawPixel failed: pixelPrefab={(pixelPrefab == null ? "null" : "set")}, canvasParent={(canvasParent == null ? "null" : canvasParent.name)}");
             return;
         }
-        GameObject pixel = PhotonNetwork.Instantiate("PixelRed", position, Quaternion.identity);
+        GameObject pixel = PhotonNetwork.IsConnected ? PhotonNetwork.Instantiate("PixelRed", position, Quaternion.identity) : Instantiate(pixelPrefab, position, Quaternion.identity, canvasParent);
         pixel.transform.SetParent(canvasParent);
         SpriteRenderer sr = pixel.GetComponent<SpriteRenderer>();
         BoxCollider2D collider = pixel.GetComponent<BoxCollider2D>();
@@ -300,15 +328,24 @@ public class BrushTool : MonoBehaviourPunCallbacks
             pixel.transform.localScale = Vector3.one * scale;
             collider.size = new Vector2(0.2f, 0.2f);
             collider.enabled = true;
+            pixelQueue.Enqueue(pixel); // Add to queue
+            pixelCount++;
             if (Time.time - lastLogTime >= 0.5f)
             {
-                Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}");
+                Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}, Pixel count: {pixelCount}");
             }
         }
         else
         {
             Debug.LogError($"Pixel at {position} missing SpriteRenderer or BoxCollider2D");
-            PhotonNetwork.Destroy(pixel);
+            if (PhotonNetwork.IsConnected)
+            {
+                PhotonNetwork.Destroy(pixel);
+            }
+            else
+            {
+                Destroy(pixel);
+            }
         }
     }
 
@@ -337,7 +374,20 @@ public class BrushTool : MonoBehaviourPunCallbacks
                 {
                     Debug.Log($"Erasing pixel at {hit.transform.position}, Scale={hit.transform.localScale.x}");
                 }
-                PhotonNetwork.Destroy(hit.gameObject);
+                if (PhotonNetwork.IsConnected)
+                {
+                    PhotonNetwork.Destroy(hit.gameObject);
+                }
+                else
+                {
+                    Destroy(hit.gameObject);
+                }
+                pixelCount--;
+                if (pixelCount < 0) pixelCount = 0;
+                if (Time.time - lastLogTime >= 0.5f)
+                {
+                    Debug.Log($"Pixel count after erase: {pixelCount}");
+                }
             }
             else if (Time.time - lastLogTime >= 0.5f)
             {
@@ -357,12 +407,22 @@ public class BrushTool : MonoBehaviourPunCallbacks
         {
             if (child.GetComponent<SpriteRenderer>() != null)
             {
-                PhotonNetwork.Destroy(child.gameObject);
+                if (PhotonNetwork.IsConnected)
+                {
+                    PhotonNetwork.Destroy(child.gameObject);
+                }
+                else
+                {
+                    Destroy(child.gameObject);
+                }
             }
         }
+        pixelQueue.Clear();
+        pixelCount = 0;
         if (Time.time - lastLogTime >= 0.5f)
         {
             Debug.Log("Canvas cleared, all pixels destroyed");
+            Debug.Log($"Pixel count reset: {pixelCount}");
             lastLogTime = Time.time;
         }
     }
@@ -379,6 +439,15 @@ public class BrushTool : MonoBehaviourPunCallbacks
             }
         }
         Debug.Log($"Total pixels in canvas: {pixelCount}");
+        this.pixelCount = pixelCount; // Sync internal count
+        pixelQueue.Clear(); // Clear queue to avoid stale references
+        foreach (Transform child in canvasParent)
+        {
+            if (child.GetComponent<SpriteRenderer>() != null)
+            {
+                pixelQueue.Enqueue(child.gameObject); // Rebuild queue
+            }
+        }
     }
 
     public void SetColorRed() { brushColor = Color.red; eraseMode = false; Debug.Log("Brush color set to red"); }
