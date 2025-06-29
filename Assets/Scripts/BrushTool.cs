@@ -2,7 +2,9 @@ using UnityEngine;
 using UnityEngine.UI;
 using UnityEngine.InputSystem;
 using Photon.Pun;
+using Photon.Realtime;
 using System.Collections.Generic;
+using ExitGames.Client.Photon;
 
 public class BrushTool : MonoBehaviourPunCallbacks
 {
@@ -24,17 +26,18 @@ public class BrushTool : MonoBehaviourPunCallbacks
     private float lastLogTime = 0f;
     private float lastDrawTime = 0f;
     private int pixelCount = 0;
-    private Queue<GameObject> pixelQueue = new Queue<GameObject>(); // Track pixels in order
+    private Queue<GameObject> pixelQueue = new Queue<GameObject>();
     private const float minSize = 0.03125f;
     private const float maxSize = 0.25f;
     private float currentSize = 0.03125f;
     private const float drawCooldown = 0.01f; // Your adjusted value
-    private const int viewIdLimit = 998; // Delete oldest pixel when exceeded
+    private const int viewIdLimit = 999;
     private InputAction mousePositionAction;
     private InputAction mouseLeftClickAction;
     private bool isMouseHeld = false;
     private PhotonView photonView;
     private bool isInitialized = false;
+    private static BrushTool instance; // Singleton instance
 
     void Awake()
     {
@@ -44,13 +47,26 @@ public class BrushTool : MonoBehaviourPunCallbacks
             Debug.LogError("PhotonView component missing on BrushTool GameObject");
         }
 
+        // Singleton pattern
+        if (instance != null && instance != this)
+        {
+            Debug.LogWarning($"Another BrushTool instance found on {gameObject.name}. Destroying this instance.");
+            Destroy(gameObject);
+            return;
+        }
+        instance = this;
+        DontDestroyOnLoad(gameObject); // Persist across scenes
+
         BrushTool[] instances = FindObjectsOfType<BrushTool>();
         if (instances.Length > 1)
         {
-            Debug.LogWarning($"Multiple BrushTool instances found: {instances.Length}. Destroying extras.");
-            for (int i = 1; i < instances.Length; i++)
+            Debug.LogWarning($"Multiple BrushTool instances found: {instances.Length}. Keeping only {gameObject.name}.");
+            for (int i = 0; i < instances.Length; i++)
             {
-                Destroy(instances[i].gameObject);
+                if (instances[i] != this)
+                {
+                    Destroy(instances[i].gameObject);
+                }
             }
         }
     }
@@ -84,7 +100,8 @@ public class BrushTool : MonoBehaviourPunCallbacks
             sizeSlider.onValueChanged.AddListener((value) =>
             {
                 currentSize = value;
-                Debug.Log($"Brush/Erase size set to {currentSize}");
+                UpdatePlayerProperties();
+                Debug.Log($"Brush/Erase size set to {currentSize} for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
             });
         }
         else
@@ -102,7 +119,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
                 if (redButton != null) redButton.gameObject.SetActive(isBrushActive);
                 if (blueButton != null) blueButton.gameObject.SetActive(isBrushActive);
                 if (greenButton != null) greenButton.gameObject.SetActive(isBrushActive);
-                Debug.Log($"Brush {(isBrushActive ? "enabled" : "disabled")}");
+                Debug.Log($"Brush {(isBrushActive ? "enabled" : "disabled")} for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
             });
         }
         if (redButton != null)
@@ -131,6 +148,9 @@ public class BrushTool : MonoBehaviourPunCallbacks
             clearButton.onClick.AddListener(() => { ClearCanvas(); Debug.Log($"ClearButton clicked, button: {clearButton.name}"); });
         }
 
+        // Set initial player properties
+        UpdatePlayerProperties();
+
         // Set up Input System actions
         mousePositionAction = new InputAction("MousePosition", InputActionType.Value, "<Mouse>/position");
         mouseLeftClickAction = new InputAction("MouseLeftClick", InputActionType.Button, "<Mouse>/leftButton");
@@ -145,8 +165,33 @@ public class BrushTool : MonoBehaviourPunCallbacks
 
     void OnDestroy()
     {
+        if (instance == this)
+        {
+            instance = null;
+        }
         if (mousePositionAction != null) mousePositionAction.Disable();
         if (mouseLeftClickAction != null) mouseLeftClickAction.Disable();
+    }
+
+    private void UpdatePlayerProperties()
+    {
+        if (PhotonNetwork.IsConnected)
+        {
+            Hashtable props = new Hashtable
+            {
+                { "BrushColor", new float[] { brushColor.r, brushColor.g, brushColor.b, brushColor.a } },
+                { "BrushSize", currentSize }
+            };
+            PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+        }
+    }
+
+    public override void OnPlayerPropertiesUpdate(Player targetPlayer, Hashtable changedProps)
+    {
+        if (changedProps.ContainsKey("BrushColor") || changedProps.ContainsKey("BrushSize"))
+        {
+            Debug.Log($"Player {targetPlayer.ActorNumber} updated properties: Color={changedProps["BrushColor"]}, Size={changedProps["BrushSize"]}");
+        }
     }
 
     private void HandleInput()
@@ -200,12 +245,13 @@ public class BrushTool : MonoBehaviourPunCallbacks
                         }
                     }
                 }
-                Debug.Log($"Drawing pixel at {worldPos} with size {currentSize}");
+                Debug.Log($"Drawing pixel at {worldPos} with size {currentSize} by Player {PhotonNetwork.LocalPlayer.ActorNumber}");
                 if (PhotonNetwork.IsConnected && photonView != null)
                 {
                     try
                     {
-                        photonView.RPC("DrawPixelRPC", RpcTarget.All, worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a);
+                        photonView.RPC("DrawPixelRPC", RpcTarget.Others, worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a, PhotonNetwork.LocalPlayer.ActorNumber);
+                        DrawPixelRPC(worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a, PhotonNetwork.LocalPlayer.ActorNumber); // Local draw
                     }
                     catch (System.Exception ex)
                     {
@@ -214,7 +260,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
                 }
                 else
                 {
-                    DrawPixelRPC(worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a);
+                    DrawPixelRPC(worldPos, currentSize, brushColor.r, brushColor.g, brushColor.b, brushColor.a, -1);
                 }
                 lastDrawnPos = worldPos;
                 lastDrawTime = Time.time;
@@ -233,7 +279,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
                         Vector3 interpPos = Vector3.Lerp(lastErasedPos, worldPos, i / (float)steps);
                         if (Time.time - lastLogTime >= 0.5f)
                         {
-                            Debug.Log($"Erasing at {interpPos} with size {currentSize}");
+                            Debug.Log($"Erasing at {interpPos} with size {currentSize} by Player {PhotonNetwork.LocalPlayer.ActorNumber}");
                         }
                         if (PhotonNetwork.IsConnected && photonView != null)
                         {
@@ -257,7 +303,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
             {
                 if (Time.time - lastLogTime >= 0.5f)
                 {
-                    Debug.Log($"Erasing at {worldPos} with size {currentSize}");
+                    Debug.Log($"Erasing at {worldPos} with size {currentSize} by Player {PhotonNetwork.LocalPlayer.ActorNumber}");
                 }
                 if (PhotonNetwork.IsConnected && photonView != null)
                 {
@@ -286,7 +332,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
         if (redButton != null) redButton.gameObject.SetActive(isBrushActive);
         if (blueButton != null) blueButton.gameObject.SetActive(isBrushActive);
         if (greenButton != null) greenButton.gameObject.SetActive(isBrushActive);
-        Debug.Log($"Erase mode {(eraseMode ? "enabled" : "disabled")}");
+        Debug.Log($"Erase mode {(eraseMode ? "enabled" : "disabled")} for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
     }
 
     public void ClearCanvas()
@@ -309,7 +355,7 @@ public class BrushTool : MonoBehaviourPunCallbacks
     }
 
     [PunRPC]
-    private void DrawPixelRPC(Vector3 position, float size, float r, float g, float b, float a)
+    private void DrawPixelRPC(Vector3 position, float size, float r, float g, float b, float a, int actorNumber)
     {
         if (pixelPrefab == null || canvasParent == null)
         {
@@ -328,11 +374,11 @@ public class BrushTool : MonoBehaviourPunCallbacks
             pixel.transform.localScale = Vector3.one * scale;
             collider.size = new Vector2(0.2f, 0.2f);
             collider.enabled = true;
-            pixelQueue.Enqueue(pixel); // Add to queue
+            pixelQueue.Enqueue(pixel);
             pixelCount++;
             if (Time.time - lastLogTime >= 0.5f)
             {
-                Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}, Pixel count: {pixelCount}");
+                Debug.Log($"Pixel instantiated at {position}, Scale={scale}, Color=({r},{g},{b},{a}), Layer={LayerMask.LayerToName(pixel.layer)}, Parent={pixel.transform.parent?.name}, ColliderEnabled={collider.enabled}, Pixel count: {pixelCount}, By Player {actorNumber}");
             }
         }
         else
@@ -439,18 +485,38 @@ public class BrushTool : MonoBehaviourPunCallbacks
             }
         }
         Debug.Log($"Total pixels in canvas: {pixelCount}");
-        this.pixelCount = pixelCount; // Sync internal count
-        pixelQueue.Clear(); // Clear queue to avoid stale references
+        this.pixelCount = pixelCount;
+        pixelQueue.Clear();
         foreach (Transform child in canvasParent)
         {
             if (child.GetComponent<SpriteRenderer>() != null)
             {
-                pixelQueue.Enqueue(child.gameObject); // Rebuild queue
+                pixelQueue.Enqueue(child.gameObject);
             }
         }
     }
 
-    public void SetColorRed() { brushColor = Color.red; eraseMode = false; Debug.Log("Brush color set to red"); }
-    public void SetColorBlue() { brushColor = Color.blue; eraseMode = false; Debug.Log("Brush color set to blue"); }
-    public void SetColorGreen() { brushColor = Color.green; eraseMode = false; Debug.Log("Brush color set to green"); }
+    public void SetColorRed()
+    {
+        brushColor = Color.red;
+        eraseMode = false;
+        UpdatePlayerProperties();
+        Debug.Log($"Brush color set to red for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
+    }
+
+    public void SetColorBlue()
+    {
+        brushColor = Color.blue;
+        eraseMode = false;
+        UpdatePlayerProperties();
+        Debug.Log($"Brush color set to blue for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
+    }
+
+    public void SetColorGreen()
+    {
+        brushColor = Color.green;
+        eraseMode = false;
+        UpdatePlayerProperties();
+        Debug.Log($"Brush color set to green for Player {PhotonNetwork.LocalPlayer.ActorNumber}");
+    }
 }
